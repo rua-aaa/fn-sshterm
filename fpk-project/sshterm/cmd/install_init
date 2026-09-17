@@ -1,0 +1,7 @@
+#!/bin/bash
+# Before install checks
+if [ -z "$TRIM_APPDEST" ]; then
+    echo "TRIM_APPDEST is empty" > "$TRIM_TEMP_LOGFILE"
+    exit 1
+fi
+exit 0

@@ -1,0 +1,10 @@
+#!/bin/bash
+# Upgrade: reinstall deps for current arch
+APP_DIR="${TRIM_APPDEST}/server"
+LOG_FILE="${TRIM_PKGVAR}/sshterm.log"
+export PATH="/var/apps/nodejs_v22/target/bin:/usr/local/bin:$PATH"
+if [ -d "$APP_DIR" ] && command -v npm >/dev/null 2>&1; then
+    cd "$APP_DIR"
+    npm install --omit=dev --no-audit --no-fund >> "$LOG_FILE" 2>&1 || true
+fi
+exit 0

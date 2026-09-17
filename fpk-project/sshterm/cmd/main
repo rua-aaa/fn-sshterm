@@ -1,0 +1,203 @@
+#!/bin/bash
+# sshterm lifecycle — NATIVE FIRST (package user cannot use docker.sock on FNOS)
+
+LOG_FILE="${TRIM_PKGVAR:-/tmp}/sshterm.log"
+PID_FILE="${TRIM_PKGVAR:-/tmp}/app.pid"
+APP_DIR="${TRIM_APPDEST}/server"
+DATA_DIR="${TRIM_PKGVAR}"
+PORT="${TRIM_SERVICE_PORT:-1070}"
+PKGHOME="${TRIM_PKGHOME:-$DATA_DIR}"
+
+mkdir -p "$DATA_DIR" "$PKGHOME" "$LOG_FILE" 2>/dev/null || true
+# ensure log dir exists
+mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
+
+log_msg() { echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE" 2>/dev/null || true; }
+
+export HOME="$PKGHOME"
+export USER="${TRIM_USERNAME:-sshterm}"
+export npm_config_cache="${DATA_DIR}/.npm"
+export npm_config_prefix="${DATA_DIR}/.npm-global"
+export NPM_CONFIG_CACHE="${DATA_DIR}/.npm"
+mkdir -p "$npm_config_cache" 2>/dev/null || true
+
+find_node() {
+    local c
+    local list=(
+        /var/apps/nodejs_v22/target/bin/node
+        /vol3/@appcenter/nodejs_v22/target/bin/node
+        /vol*/@appcenter/nodejs_v22/target/bin/node
+        /usr/local/bin/node
+        /usr/bin/node
+    )
+    if [ -f "$DATA_DIR/node_path.txt" ]; then
+        c=$(head -n 1 "$DATA_DIR/node_path.txt" | tr -d '[:space:]')
+        if [ -n "$c" ] && [ -x "$c" ]; then echo "$c"; return 0; fi
+    fi
+    for c in "${list[@]}"; do
+        if [ -n "$c" ] && [ -x "$c" ]; then echo "$c"; return 0; fi
+    done
+    for c in /vol*/@appcenter/nodejs*/target/bin/node; do
+        if [ -x "$c" ]; then echo "$c"; return 0; fi
+    done
+    return 1
+}
+
+http_ready() {
+    local url="http://127.0.0.1:${PORT}/api/health"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsS --max-time 2 "$url" >/dev/null 2>&1 && return 0
+    fi
+    if command -v wget >/dev/null 2>&1; then
+        wget -q -T 2 -O /dev/null "$url" 2>/dev/null && return 0
+    fi
+    return 1
+}
+
+native_status() {
+    if [ -f "$PID_FILE" ]; then
+        local pid
+        pid=$(head -n 1 "$PID_FILE" | tr -d '[:space:]')
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+        rm -f "$PID_FILE"
+    fi
+    return 1
+}
+
+native_stop() {
+    if [ -f "$PID_FILE" ]; then
+        local pid
+        pid=$(head -n 1 "$PID_FILE" | tr -d '[:space:]')
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            kill -TERM "$pid" 2>/dev/null || true
+            sleep 2
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
+        rm -f "$PID_FILE"
+    fi
+    return 0
+}
+
+native_start() {
+    local node_bin
+    node_bin=$(find_node) || {
+        log_msg "native: node not found"
+        echo "未找到 Node.js，请在飞牛应用中心安装 Node.js v22 后再启动 sshterm。" > "${TRIM_TEMP_LOGFILE:-/dev/null}" 2>/dev/null || true
+        return 1
+    }
+    if [ ! -f "$APP_DIR/index.js" ]; then
+        log_msg "native: missing index.js at $APP_DIR"
+        echo "sshterm 文件缺失: $APP_DIR/index.js" > "${TRIM_TEMP_LOGFILE:-/dev/null}" 2>/dev/null || true
+        return 1
+    fi
+    if [ ! -d "$APP_DIR/node_modules/express" ] && [ ! -d "$APP_DIR/node_modules/ssh2" ]; then
+        log_msg "native: node_modules incomplete"
+        echo "sshterm 依赖不完整（node_modules）。请重新安装应用包。" > "${TRIM_TEMP_LOGFILE:-/dev/null}" 2>/dev/null || true
+        return 1
+    fi
+
+    export PATH="$(dirname "$node_bin"):$PATH"
+    export PORT="$PORT"
+    export TRIM_SERVICE_PORT="$PORT"
+    export SSHTERM_DATA="$DATA_DIR"
+    export SSHTERM_WEB="${APP_DIR}/web/dist"
+    export GATEWAY_PREFIX="/app/sshterm"
+    export TRIM_APPDEST="${TRIM_APPDEST}"
+    export NODE_PATH="${APP_DIR}/node_modules"
+    export HOME="$PKGHOME"
+    cd "$APP_DIR" || return 1
+
+    log_msg "native: start node=$node_bin port=$PORT data=$DATA_DIR web=$SSHTERM_WEB uid=$(id -u) user=$(id -un 2>/dev/null)"
+    # If lifecycle runs as package user but we need root shell, try sudo when available
+    RUN_AS_ROOT=0
+    if [ "$(id -u)" = "0" ]; then
+        RUN_AS_ROOT=1
+        log_msg "running as root — local shell will be root"
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+        RUN_AS_ROOT=1
+        log_msg "passwordless sudo available — starting node via sudo"
+    fi
+    if [ "$RUN_AS_ROOT" = "1" ] && [ "$(id -u)" != "0" ]; then
+        if command -v setsid >/dev/null 2>&1; then
+            setsid sudo -n "$node_bin" index.js >>"$LOG_FILE" 2>&1 &
+        else
+            nohup sudo -n "$node_bin" index.js >>"$LOG_FILE" 2>&1 &
+        fi
+    else
+        if command -v setsid >/dev/null 2>&1; then
+            setsid "$node_bin" index.js >>"$LOG_FILE" 2>&1 &
+        else
+            nohup "$node_bin" index.js >>"$LOG_FILE" 2>&1 &
+        fi
+    fi
+    printf "%s" "$!" > "$PID_FILE"
+    sleep 1
+    if native_status; then
+        log_msg "native: pid=$(cat "$PID_FILE") running"
+        return 0
+    fi
+    # process may have exited — show last log lines in logfile already
+    log_msg "native: process died immediately, see log tail"
+    return 1
+}
+
+start_app() {
+    log_msg "==== start_app begin ===="
+    log_msg "uid=$(id -u) user=$(id -un 2>/dev/null) HOME=$HOME"
+    log_msg "APPDEST=$TRIM_APPDEST PKGVAR=$TRIM_PKGVAR PORT=$PORT"
+    log_msg "APP_DIR=$APP_DIR exists=$([ -d "$APP_DIR" ] && echo yes || echo no)"
+    log_msg "node_modules=$([ -d "$APP_DIR/node_modules" ] && echo yes || echo no)"
+    log_msg "web_dist=$([ -f "$APP_DIR/web/dist/index.html" ] && echo yes || echo no)"
+
+    if http_ready; then
+        log_msg "already healthy on :$PORT"
+        return 0
+    fi
+
+    if native_start; then
+        # wait for listen
+        local i=0
+        while [ $i -lt 8 ]; do
+            if http_ready; then
+                log_msg "start_app OK (health http://127.0.0.1:$PORT/api/health)"
+                return 0
+            fi
+            if ! native_status; then
+                log_msg "process exited during wait i=$i"
+                break
+            fi
+            sleep 1
+            i=$((i+1))
+        done
+        if native_status; then
+            log_msg "process up but health not ready yet (port=$PORT)"
+            # still treat as started — web may bind slightly later
+            return 0
+        fi
+    fi
+
+    log_msg "start_app FAILED"
+    echo "sshterm 启动失败。请查看 /var/apps/sshterm/var/sshterm.log（需 Node v22 + 完整 node_modules）" > "${TRIM_TEMP_LOGFILE:-/dev/null}" 2>/dev/null || true
+    return 1
+}
+
+stop_app() {
+    log_msg "==== stop_app ===="
+    native_stop
+    return 0
+}
+
+status_app() {
+    if http_ready; then return 0; fi
+    if native_status; then return 0; fi
+    return 1
+}
+
+case "$1" in
+start) start_app; exit $? ;;
+stop) stop_app; exit 0 ;;
+status) if status_app; then exit 0; else exit 3; fi ;;
+*) echo "Unknown: $1" > "${TRIM_TEMP_LOGFILE:-/dev/null}" 2>/dev/null || true; exit 1 ;;
+esac

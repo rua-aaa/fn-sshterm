@@ -1,0 +1,29 @@
+{
+    ".url": {
+        "sshterm.Application": {
+            "title": "SSH Terminal",
+            "icon": "images/icon_{0}.png",
+            "type": "iframe",
+            "protocol": "http",
+            "port": "1070",
+            "url": "/",
+            "allUsers": false,
+            "control": {
+                "accessPerm": "readonly"
+            }
+        },
+        "sshterm.gateway": {
+            "title": "SSH Terminal 网关",
+            "icon": "images/icon_{0}.png",
+            "type": "iframe",
+            "protocol": "",
+            "gatewayPrefix": "/app/sshterm",
+            "gatewaySocket": "app.sock",
+            "url": "/app/sshterm",
+            "allUsers": false,
+            "control": {
+                "accessPerm": "readonly"
+            }
+        }
+    }
+}

@@ -1,0 +1,19 @@
+appname=sshterm
+version=1.0.9
+display_name=SSH Terminal
+desc="""网页 SSH 终端（xterm.js）。1.0.8 以 root 运行，本机 Shell 可直接管理系统（无需 sudo）。"""
+platform=all
+source=thirdparty
+maintainer=sshterm
+maintainer_url=https://github.com/snltty/fnpackup
+distributor=sshterm
+distributor_url=https://github.com/snltty/fnpackup
+desktop_uidir=ui
+desktop_applaunchname=sshterm.Application
+service_port=1070
+checkport=true
+ctl_stop=true
+install_dep_apps=nodejs_v22
+disable_authorization_path=true
+changelog=1.0.9 UI：大圆角、侧栏收窄可收缩、去掉左侧菜单，配置入口在顶栏
+

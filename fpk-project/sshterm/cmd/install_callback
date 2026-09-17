@@ -1,0 +1,101 @@
+#!/bin/bash
+# install_callback — FNOS package user (no docker, no /home/<user>)
+# Use bundled node_modules; only verify require() works.
+
+LOG_FILE="${TRIM_PKGVAR:-/tmp}/sshterm.log"
+APP_DIR="${TRIM_APPDEST}/server"
+DATA_DIR="${TRIM_PKGVAR}"
+PKGHOME="${TRIM_PKGHOME:-$DATA_DIR}"
+
+mkdir -p "$DATA_DIR" "$PKGHOME" "${DATA_DIR}/.npm" 2>/dev/null || true
+export HOME="$PKGHOME"
+export USER="${TRIM_USERNAME:-sshterm}"
+export npm_config_cache="${DATA_DIR}/.npm"
+export npm_config_prefix="${DATA_DIR}/.npm-global"
+export NPM_CONFIG_CACHE="${DATA_DIR}/.npm"
+
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE" 2>/dev/null || true; }
+
+log "install_callback start"
+log "uid=$(id -u 2>/dev/null) uname=$(uname -m 2>/dev/null) HOME=$HOME"
+log "APPDEST=$TRIM_APPDEST PKGVAR=$TRIM_PKGVAR PKGHOME=$TRIM_PKGHOME"
+log "server_dir=$APP_DIR index=$([ -f "$APP_DIR/index.js" ] && echo yes || echo NO)"
+
+if [ ! -f "$DATA_DIR/profiles.json" ]; then
+    echo "[]" > "$DATA_DIR/profiles.json" 2>/dev/null || true
+fi
+
+NODE_BIN=""
+for c in \
+    /var/apps/nodejs_v22/target/bin/node \
+    /vol3/@appcenter/nodejs_v22/target/bin/node \
+    /vol*/@appcenter/nodejs_v22/target/bin/node \
+    /usr/local/bin/node \
+    /usr/bin/node
+do
+    if [ -x "$c" ]; then NODE_BIN="$c"; break; fi
+done
+log "NODE_BIN=${NODE_BIN:-NOT_FOUND}"
+
+if [ -z "$NODE_BIN" ]; then
+    log "FATAL: node not found. Install Node.js v22 in FNOS app center."
+    echo "sshterm 需要应用中心的 Node.js v22 运行时，请先安装后再启动。" > "${TRIM_TEMP_LOGFILE:-/dev/null}" 2>/dev/null || true
+    exit 1
+fi
+
+if [ ! -f "$APP_DIR/index.js" ]; then
+    log "FATAL: missing $APP_DIR/index.js"
+    echo "sshterm 程序文件缺失：$APP_DIR/index.js" > "${TRIM_TEMP_LOGFILE:-/dev/null}" 2>/dev/null || true
+    exit 1
+fi
+
+# Prefer bundled modules — do NOT npm install (avoids EACCES)
+if [ -d "$APP_DIR/node_modules" ]; then
+    log "node_modules present: $(ls "$APP_DIR/node_modules" 2>/dev/null | wc -l) entries"
+else
+    log "WARN: node_modules missing in package"
+fi
+
+# Verify core deps can be required
+export NODE_PATH="$APP_DIR/node_modules"
+VERIFY_OUT=$("$NODE_BIN" -e "
+const path=require('path');
+const nm=path.join(process.env.APP_DIR||'$APP_DIR','node_modules');
+module.paths.unshift(nm);
+try {
+  require('express');
+  require('ws');
+  require('ssh2');
+  console.log('REQUIRE_OK');
+} catch(e) {
+  console.log('REQUIRE_FAIL '+e.message);
+}
+" 2>&1) || true
+log "require_check=$VERIFY_OUT"
+
+if echo "$VERIFY_OUT" | grep -q 'REQUIRE_OK'; then
+    echo "$NODE_BIN" > "$DATA_DIR/node_path.txt"
+    echo "ok" > "$DATA_DIR/install_state.txt"
+    log "install_callback OK (native + bundled modules)"
+    exit 0
+fi
+
+# Optional last-resort npm install with writable cache (still may fail on some systems)
+NPM_BIN="$(dirname "$NODE_BIN")/npm"
+if [ -x "$NPM_BIN" ] && [ -f "$APP_DIR/package.json" ]; then
+    log "fallback npm install --cache $npm_config_cache"
+    cd "$APP_DIR" || exit 0
+    "$NPM_BIN" install --omit=dev --ignore-scripts --no-audit --no-fund \
+        --cache "$npm_config_cache" >>"$LOG_FILE" 2>&1 || log "npm fallback failed"
+    VERIFY2=$("$NODE_BIN" -e "module.paths.unshift('$APP_DIR/node_modules'); require('express'); require('ws'); require('ssh2'); console.log('REQUIRE_OK')" 2>&1) || true
+    log "require_check2=$VERIFY2"
+    if echo "$VERIFY2" | grep -q 'REQUIRE_OK'; then
+        echo "ok" > "$DATA_DIR/install_state.txt"
+        exit 0
+    fi
+fi
+
+echo "sshterm 依赖校验失败。日志：$LOG_FILE" > "${TRIM_TEMP_LOGFILE:-/dev/null}" 2>/dev/null || true
+echo "fail" > "$DATA_DIR/install_state.txt"
+log "install_callback FAILED"
+exit 1
