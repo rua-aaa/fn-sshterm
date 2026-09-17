@@ -1,0 +1,12 @@
+node_modules/
+dist/
+data/
+*.log
+.DS_Store
+fpk-project/**/node_modules/
+fpk-project/**/data/
+fpk-tools/*.exe
+release/*.fpk
+web/dist/
+**/node_modules/
+**/.npm/
